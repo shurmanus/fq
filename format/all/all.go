@@ -46,6 +46,7 @@ import (
 	_ "github.com/wader/fq/format/protobuf"
 	_ "github.com/wader/fq/format/riff"
 	_ "github.com/wader/fq/format/rtmp"
+	_ "github.com/wader/fq/format/sqlite3"
 	_ "github.com/wader/fq/format/tar"
 	_ "github.com/wader/fq/format/text"
 	_ "github.com/wader/fq/format/tiff"
