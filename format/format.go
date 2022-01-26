@@ -112,6 +112,7 @@ const (
 	OPUS_PACKET         = "opus_packet"
 	PCAP                = "pcap"
 	PCAPNG              = "pcapng"
+	PDF                 = "pdf"
 	PNG                 = "png"
 	PRORES_FRAME        = "prores_frame"
 	PROTOBUF            = "protobuf"
