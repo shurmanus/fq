@@ -41,10 +41,10 @@ import (
 	"embed"
 
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
-	"github.com/wader/fq/internal/mathextra"
+	"github.com/wader/fq/internal/mathex"
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
@@ -52,14 +52,29 @@ import (
 var sqlite3FS embed.FS
 
 func init() {
-	registry.MustRegister(decode.Format{
+	interp.RegisterFormat(decode.Format{
 		Name:        format.SQLITE3,
 		Description: "SQLite v3 database",
 		Groups:      []string{format.PROBE},
 		DecodeFn:    sqlite3Decode,
 		Functions:   []string{"torepr"},
-		Files:       sqlite3FS,
 	})
+	interp.RegisterFS(sqlite3FS)
+}
+
+type intStack struct {
+	s []int
+}
+
+func (s *intStack) Push(n int) { s.s = append(s.s, n) }
+
+func (s *intStack) Pop() (int, bool) {
+	if len(s.s) == 0 {
+		return 0, false
+	}
+	var n int
+	n, s.s = s.s[0], s.s[1:]
+	return n, true
 }
 
 const sqlite3HeaderSize = 100
@@ -79,7 +94,7 @@ const (
 	serialTypeInternal11 = 11
 )
 
-var serialTypeMap = scalar.SToSymStr{
+var serialTypeMap = scalar.UintMapSymStr{
 	serialTypeNULL:       "null",
 	serialTypeS8:         "int8",
 	serialTypeSBE16:      "int16",
@@ -94,8 +109,8 @@ var serialTypeMap = scalar.SToSymStr{
 	serialTypeInternal11: "internal11",
 }
 
-var serialTypeMapper = scalar.Fn(func(s scalar.S) (scalar.S, error) {
-	typ := s.ActualS()
+var serialTypeMapper = scalar.SintFn(func(s scalar.Sint) (scalar.Sint, error) {
+	typ := uint64(s.Actual)
 	if st, ok := serialTypeMap[typ]; ok {
 		s.Description = st
 	} else if typ >= 12 && typ%2 == 0 {
@@ -106,15 +121,17 @@ var serialTypeMapper = scalar.Fn(func(s scalar.S) (scalar.S, error) {
 	return s, nil
 })
 
+type pageType int
+
 const (
-	pageTypePtrmap             = 0x00
-	pageTypeBTreeIndexInterior = 0x02
-	pageTypeBTreeTableInterior = 0x05
-	pageTypeBTreeIndexLeaf     = 0x0a
-	pageTypeBTreeTableLeaf     = 0x0d
+	pageTypePtrmap             pageType = 0x00
+	pageTypeBTreeIndexInterior          = 0x02
+	pageTypeBTreeTableInterior          = 0x05
+	pageTypeBTreeIndexLeaf              = 0x0a
+	pageTypeBTreeTableLeaf              = 0x0d
 )
 
-var pageTypeMap = scalar.UToSymStr{
+var pageTypeMap = scalar.UintMapSymStr{
 	// pageTypePtrmap:             "ptrmap",
 	pageTypeBTreeIndexInterior: "index_interior",
 	pageTypeBTreeTableInterior: "table_interior",
@@ -122,7 +139,7 @@ var pageTypeMap = scalar.UToSymStr{
 	pageTypeBTreeTableLeaf:     "table_leaf",
 }
 
-var ptrmapTypeMap = scalar.UToSymStr{
+var ptrmapTypeMap = scalar.UintMapSymStr{
 	1: "rootpage",
 	2: "freepage",
 	3: "overflow1",
@@ -136,13 +153,13 @@ const (
 	textEncodingUTF16BE = 3
 )
 
-var textEncodingMap = scalar.UToSymStr{
+var textEncodingMap = scalar.UintMapSymStr{
 	textEncodingUTF8:    "utf8",
 	textEncodingUTF16LE: "utf16le",
 	textEncodingUTF16BE: "utf16be",
 }
 
-var versionMap = scalar.UToSymStr{
+var versionMap = scalar.UintMapSymStr{
 	1: "legacy",
 	2: "wal",
 }
@@ -164,13 +181,13 @@ func varintDecode(d *decode.D) int64 {
 			break
 		}
 	}
-	return mathextra.TwosComplement(64, n)
+	return mathex.TwosComplement(64, n)
 }
 
 func sqlite3DecodeSerialType(d *decode.D, h sqlite3Header, typ int64) {
 	switch typ {
 	case serialTypeNULL:
-		d.FieldValueNil("value")
+		d.FieldValueAny("value", nil)
 	case serialTypeS8:
 		d.FieldS8("value")
 	case serialTypeSBE16:
@@ -186,9 +203,9 @@ func sqlite3DecodeSerialType(d *decode.D, h sqlite3Header, typ int64) {
 	case serialTypeFloatBE64:
 		d.FieldF64("value")
 	case serialTypeInteger0:
-		d.FieldValueU("value", 0)
+		d.FieldValueAny("value", 0)
 	case serialTypeInteger1:
-		d.FieldValueU("value", 1)
+		d.FieldValueAny("value", 1)
 	case 10, 11:
 		// internal, should not appear in wellformed file
 	default:
@@ -228,7 +245,7 @@ func sqlite3DecodeCellFreeblock(d *decode.D) uint64 {
 
 func sqlite3CellPayloadDecode(d *decode.D, h sqlite3Header) {
 	lengthStart := d.Pos()
-	length := d.FieldSFn("length", varintDecode)
+	length := d.FieldSintFn("length", varintDecode)
 	lengthBits := d.Pos() - lengthStart
 	var serialTypes []int64
 	d.FramedFn((length)*8-lengthBits, func(d *decode.D) {
@@ -236,7 +253,7 @@ func sqlite3CellPayloadDecode(d *decode.D, h sqlite3Header) {
 			for !d.End() {
 				serialTypes = append(
 					serialTypes,
-					d.FieldSFn("serial", varintDecode, serialTypeMapper),
+					d.FieldSintFn("serial", varintDecode, serialTypeMapper),
 				)
 			}
 		})
@@ -276,7 +293,7 @@ func sqlite3DecodeTreePage(d *decode.D, h sqlite3Header, x int64, payLoadLen int
 			d.FieldStruct("overflow_page", func(d *decode.D) {
 				br := d.FieldRawLen("data", firstPayLoadLen*8)
 				nextPage = d.FieldS32("next_page")
-				d.MustCopyBits(payLoadBB, br)
+				d.CopyBits(payLoadBB, br)
 			})
 
 			payLoadLenLeft := payLoadLen - firstPayLoadLen
@@ -284,10 +301,10 @@ func sqlite3DecodeTreePage(d *decode.D, h sqlite3Header, x int64, payLoadLen int
 				d.SeekAbs(((nextPage - 1) * h.pageSize) * 8)
 				d.FieldStruct("overflow_page", func(d *decode.D) {
 					nextPage = d.FieldS32("next_page")
-					overflowSize := mathextra.MinInt64(h.pageSize-4, payLoadLenLeft)
+					overflowSize := mathex.Min(h.pageSize-4, payLoadLenLeft)
 					br := d.FieldRawLen("data", overflowSize*8)
 					payLoadLenLeft -= overflowSize
-					d.MustCopyBits(payLoadBB, br)
+					d.CopyBits(payLoadBB, br)
 				})
 			}
 		})
@@ -299,26 +316,34 @@ func sqlite3DecodeTreePage(d *decode.D, h sqlite3Header, x int64, payLoadLen int
 	}
 }
 
+func sqlite3SeekPage(d *decode.D, h sqlite3Header, i int) {
+	pageOffset := h.pageSize * int64(i)
+	if i == 0 {
+		pageOffset += sqlite3HeaderSize
+	}
+	d.SeekAbs(pageOffset * 8)
+}
+
 func sqlite3Decode(d *decode.D, in interface{}) interface{} {
 	var h sqlite3Header
 
 	d.FieldStruct("header", func(d *decode.D) {
-		d.FieldUTF8("magic", 16, d.AssertStr("SQLite format 3\x00"))
-		pageSizeS := d.FieldScalarU16("page_size", scalar.UToSymU{1: 65536}) // in bytes. Must be a power of two between 512 and 32768 inclusive, or the value 1 representing a page size of 65536.
-		d.FieldU8("write_version", versionMap)                               // 1 for legacy; 2 for WAL.
-		d.FieldU8("read_version", versionMap)                                // . 1 for legacy; 2 for WAL.
-		d.FieldU8("unused_space")                                            // at the end of each page. Usually 0.
-		d.FieldU8("maximum_embedded_payload_fraction")                       // . Must be 64.
-		d.FieldU8("minimum_embedded_payload_fraction")                       // . Must be 32.
-		d.FieldU8("leaf_payload_fraction")                                   // . Must be 32.
-		d.FieldU32("file_change_counter")                                    //
-		databaseSizePages := int(d.FieldU32("database_size_pages"))          // . The "in-header database size".
-		d.FieldU32("page_number_freelist")                                   // of the first freelist trunk page.
-		d.FieldU32("total_number_freelist")                                  // pages.
-		d.FieldU32("schema_cookie")                                          // .
-		d.FieldU32("schema_format_number")                                   // . Supported schema formats are 1, 2, 3, and 4.
-		d.FieldU32("default_page_cache_size")                                // .
-		d.FieldU32("page_number_largest_root_btree")                         // page when in auto-vacuum or incremental-vacuum modes, or zero otherwise.
+		d.FieldUTF8("magic", 16, d.StrAssert("SQLite format 3\x00"))
+		pageSizeS := d.FieldScalarU16("page_size", scalar.UintMapSymUint{1: 65536}) // in bytes. Must be a power of two between 512 and 32768 inclusive, or the value 1 representing a page size of 65536.
+		d.FieldU8("write_version", versionMap)                                      // 1 for legacy; 2 for WAL.
+		d.FieldU8("read_version", versionMap)                                       // . 1 for legacy; 2 for WAL.
+		d.FieldU8("unused_space")                                                   // at the end of each page. Usually 0.
+		d.FieldU8("maximum_embedded_payload_fraction")                              // . Must be 64.
+		d.FieldU8("minimum_embedded_payload_fraction")                              // . Must be 32.
+		d.FieldU8("leaf_payload_fraction")                                          // . Must be 32.
+		d.FieldU32("file_change_counter")                                           //
+		databaseSizePages := int(d.FieldU32("database_size_pages"))                 // . The "in-header database size".
+		d.FieldU32("page_number_freelist")                                          // of the first freelist trunk page.
+		d.FieldU32("total_number_freelist")                                         // pages.
+		d.FieldU32("schema_cookie")                                                 // .
+		d.FieldU32("schema_format_number")                                          // . Supported schema formats are 1, 2, 3, and 4.
+		d.FieldU32("default_page_cache_size")                                       // .
+		d.FieldU32("page_number_largest_root_btree")                                // page when in auto-vacuum or incremental-vacuum modes, or zero otherwise.
 		textEncoding := int(d.FieldU32("text_encoding", textEncodingMap))
 		d.FieldU32("user_version")                       // " as read and set by the user_version pragma.
 		d.FieldU32("incremental_vacuum_mode")            // False (zero) otherwise.
@@ -328,9 +353,9 @@ func sqlite3Decode(d *decode.D, in interface{}) interface{} {
 		d.FieldU32("sqlite_version_number")              //
 
 		// TODO: nicer API for fallback?
-		pageSize := int64(pageSizeS.ActualU())
+		pageSize := int64(pageSizeS.Actual)
 		if pageSizeS.Sym != nil {
-			pageSize = int64(pageSizeS.SymU())
+			pageSize = int64(pageSizeS.SymUint())
 		}
 
 		h = sqlite3Header{
@@ -340,13 +365,64 @@ func sqlite3Decode(d *decode.D, in interface{}) interface{} {
 		}
 	})
 
-	d.FieldArray("pages", func(d *decode.D) {
-		d.RangeSorted = false
+	// pageTypes := map[int]pageType{}
+	// pageVisitStack := &intStack{}
+	// pageVisitStack.Push(0)
 
+	// for {
+	// 	i, ok := pageVisitStack.Pop()
+	// 	if !ok {
+	// 		break
+	// 	}
+	// 	if _, ok := pageTypes[i]; ok {
+	// 		d.Fatalf("page %d already visited", i)
+	// 	}
+
+	// 	sqlite3SeekPage(d, h, i)
+	// 	typ := d.U8()
+
+	// 	switch typ {
+	// 	case pageTypeBTreeIndexInterior,
+	// 		pageTypeBTreeTableInterior:
+
+	// 		d.U16() // start_free_blocks
+	// 		d.U16() // cell_start
+	// 		d.U8()  // cell_fragments
+	// 		rightPointer := d.U32()
+
+	// 		pageCells := d.U16()
+	// 		for i := uint64(0); i < pageCells; i++ {
+
+	// 		}
+
+	// 		switch typ {
+	// 		case pageTypeBTreeIndexInterior:
+
+	// 		}
+
+	// 	default:
+	// 		d.Fatalf("asd")
+	// 	}
+
+	// }
+
+	// return nil
+
+	d.FieldArray("pages", func(d *decode.D) {
 		// add a filler entry to make real pages start at index 1
 		d.FieldStruct("page", func(d *decode.D) {
 			d.FieldValueStr("type", "page0_index_fill")
 		})
+
+		// for {
+		// i, ok := pageStack.Pop()
+		// if !ok {
+		// 	break
+		// }
+		// if _, ok := pageSeen[i]; ok {
+		// 	d.Fatalf("page %d already visited", i)
+		// }
+		// pageSeen[i] = struct{}{}
 
 		for i := 0; i < h.databaseSizePages; i++ {
 			pageOffset := h.pageSize * int64(i)
@@ -355,6 +431,7 @@ func sqlite3Decode(d *decode.D, in interface{}) interface{} {
 			if i == 0 {
 				d.SeekRel(sqlite3HeaderSize * 8)
 			}
+			sqlite3SeekPage(d, h, i)
 
 			d.FieldStruct("page", func(d *decode.D) {
 				typ := d.FieldU8("type", pageTypeMap)
@@ -413,18 +490,18 @@ func sqlite3Decode(d *decode.D, in interface{}) interface{} {
 								switch typ {
 								case pageTypeBTreeIndexInterior:
 									d.FieldU32("left_child")
-									payLoadLen := d.FieldSFn("payload_len", varintDecode)
+									payLoadLen := d.FieldSintFn("payload_len", varintDecode)
 									// formula for x from sqlite format spec
 									sqlite3DecodeTreePage(d, h, ((h.pageSize-12)*64/255)-23, payLoadLen)
 								case pageTypeBTreeTableInterior:
 									d.FieldU32("left_child")
-									d.FieldSFn("rowid", varintDecode)
+									d.FieldSintFn("rowid", varintDecode)
 								case pageTypeBTreeIndexLeaf:
-									payLoadLen := d.FieldSFn("payload_len", varintDecode)
+									payLoadLen := d.FieldSintFn("payload_len", varintDecode)
 									sqlite3DecodeTreePage(d, h, ((h.pageSize-12)*64/255)-23, payLoadLen)
 								case pageTypeBTreeTableLeaf:
-									payLoadLen := d.FieldSFn("payload_len", varintDecode)
-									d.FieldSFn("rowid", varintDecode)
+									payLoadLen := d.FieldSintFn("payload_len", varintDecode)
+									d.FieldSintFn("rowid", varintDecode)
 									sqlite3DecodeTreePage(d, h, h.pageSize-35, payLoadLen)
 								}
 							})
