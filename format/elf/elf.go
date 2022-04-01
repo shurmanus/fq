@@ -16,12 +16,20 @@ import (
 	"github.com/wader/fq/pkg/scalar"
 )
 
+var x86_64Format decode.Group
+var arm64Format decode.Group
+
 func init() {
 	interp.RegisterFormat(decode.Format{
 		Name:        format.ELF,
 		Description: "Executable and Linkable Format",
 		Groups:      []string{format.PROBE},
 		DecodeFn:    elfDecode,
+		Dependencies: []decode.Dependency{
+			// TODO: x86_32?
+			{Names: []string{format.X86_64}, Group: &x86_64Format},
+			{Names: []string{format.ARM64}, Group: &arm64Format},
+		},
 	})
 }
 
@@ -129,6 +137,15 @@ var machineNames = scalar.UToScalar{
 	0xf3:      {Sym: "risc_v", Description: "RISC-V"},
 	0xf7:      {Sym: "bpf", Description: "Berkeley Packet Filter"},
 	0x101:     {Sym: "wdc_65C816", Description: "WDC 65C816"},
+}
+
+var machineToFormatFn = map[int]func(d *decode.D, base uint64, symLookup func(uint64) (string, uint64)){
+	EM_X86_64: func(d *decode.D, base uint64, symLookup func(uint64) (string, uint64)) {
+		d.Format(x86_64Format, format.X86_64In{Base: int64(base), SymLookup: symLookup})
+	},
+	EM_ARM64: func(d *decode.D, base uint64, symLookup func(uint64) (string, uint64)) {
+		d.Format(arm64Format, format.ARM64In{Base: int64(base), SymLookup: symLookup})
+	},
 }
 
 var phTypeNames = scalar.URangeToScalar{
@@ -793,6 +810,8 @@ func elfDecodeDynamicTags(d *decode.D, ec elfContext, dc dynamicContext) {
 }
 
 func elfDecodeSectionHeader(d *decode.D, ec elfContext, sh sectionHeader) {
+	var execInstr bool
+
 	shFlags := func(d *decode.D, archBits int) {
 		d.FieldStruct("flags", func(d *decode.D) {
 			if d.Endian == decode.LittleEndian {
@@ -801,7 +820,7 @@ func elfDecodeSectionHeader(d *decode.D, ec elfContext, sh sectionHeader) {
 				d.FieldBool("strings")
 				d.FieldBool("merge")
 				d.FieldU1("unused0")
-				d.FieldBool("execinstr")
+				execInstr = d.FieldBool("execinstr")
 				d.FieldBool("alloc")
 				d.FieldBool("write")
 				d.FieldBool("tls")
@@ -831,13 +850,14 @@ func elfDecodeSectionHeader(d *decode.D, ec elfContext, sh sectionHeader) {
 				d.FieldBool("strings")
 				d.FieldBool("merge")
 				d.FieldU1("unused2")
-				d.FieldBool("execinstr")
+				execInstr = d.FieldBool("execinstr")
 				d.FieldBool("alloc")
 				d.FieldBool("write")
 			}
 		})
 	}
 
+	var addr uint64
 	var offset int64
 	var size int64
 	var entSize int64
@@ -848,7 +868,7 @@ func elfDecodeSectionHeader(d *decode.D, ec elfContext, sh sectionHeader) {
 		d.FieldU32("name", strTable(ec.strTabMap[STRTAB_SHSTRTAB]))
 		typ = d.FieldU32("type", sectionHeaderTypeMap, scalar.ActualHex)
 		shFlags(d, ec.archBits)
-		d.FieldU("addr", ec.archBits, scalar.ActualHex)
+		addr = d.FieldU("addr", ec.archBits, scalar.ActualHex)
 		offset = int64(d.FieldU("offset", ec.archBits)) * 8
 		size = int64(d.FieldU32("size", scalar.ActualHex) * 8)
 		d.FieldU32("link")
@@ -859,7 +879,7 @@ func elfDecodeSectionHeader(d *decode.D, ec elfContext, sh sectionHeader) {
 		d.FieldU32("name", strTable(ec.strTabMap[STRTAB_SHSTRTAB]))
 		typ = d.FieldU32("type", sectionHeaderTypeMap, scalar.ActualHex)
 		shFlags(d, ec.archBits)
-		d.FieldU("addr", ec.archBits, scalar.ActualHex)
+		addr = d.FieldU("addr", ec.archBits, scalar.ActualHex)
 		offset = int64(d.FieldU("offset", ec.archBits, scalar.ActualHex) * 8)
 		size = int64(d.FieldU64("size") * 8)
 		d.FieldU32("link")
@@ -892,9 +912,34 @@ func elfDecodeSectionHeader(d *decode.D, ec elfContext, sh sectionHeader) {
 			elfDecodeSymbolTable(d, ec, int(size/entSize), ec.strTabMap[STRTAB_DYNSTR])
 		})
 	case SHT_PROGBITS:
-		// TODO: name progbits?
-		// TODO: decode opcodes
-		d.FieldRawLen("data", size)
+		// TODO: verify this, seems to result in strange relative addresses
+		symLookup := func(symAddr uint64) (string, uint64) {
+			var best *symbol
+
+			for _, sh := range ec.sections {
+				for i, s := range sh.symbols {
+					if symAddr >= s.value && (best == nil || symAddr-s.value < best.value-s.value) {
+						best = &sh.symbols[i]
+					}
+				}
+			}
+			if best == nil {
+				return "", 0
+			}
+			return strIndexNull(int(best.name), ec.strTabMap[STRTAB_STRTAB]), best.value
+		}
+
+		// TODO: name progbits? instructions?
+		if fn, ok := machineToFormatFn[ec.machine]; execInstr && ok {
+			d.FieldArray("code", func(d *decode.D) {
+				d.FramedFn(size, func(d *decode.D) {
+					fn(d, addr, symLookup)
+				})
+			})
+		} else {
+			d.FieldRawLen("data", size)
+		}
+
 	case SHT_GNU_HASH:
 		d.FieldStruct("gnu_hash", func(d *decode.D) {
 			elfDecodeGNUHash(d, ec, size, ec.strTabMap[STRTAB_DYNSTR])

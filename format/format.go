@@ -26,6 +26,7 @@ const (
 	AMF0                = "amf0"
 	APEV2               = "apev2"
 	AR                  = "ar"
+	ARM64               = "arm64"
 	ASN1_BER            = "asn1_ber"
 	AV1_CCR             = "av1_ccr"
 	AV1_FRAME           = "av1_frame"
@@ -119,6 +120,9 @@ const (
 	VPX_CCR             = "vpx_ccr"
 	WAV                 = "wav"
 	WEBP                = "webp"
+	X86_16              = "x86_16"
+	X86_32              = "x86_32"
+	X86_64              = "x86_64"
 	XING                = "xing"
 	XML                 = "xml"
 	YAML                = "yaml"
@@ -301,4 +305,14 @@ type HTMLIn struct {
 type CSVLIn struct {
 	Comma   string `doc:"Separator character"`
 	Comment string `doc:"Comment line character"`
+}
+
+type X86_64In struct {
+	SymLookup func(symAddr uint64) (string, uint64)
+	Base      int64
+}
+
+type ARM64In struct {
+	SymLookup func(symAddr uint64) (string, uint64)
+	Base      int64
 }
