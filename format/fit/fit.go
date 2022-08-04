@@ -1,5 +1,7 @@
 package fit
 
+// TODO: field_definition and message_type_specific: 1
+
 // https://developer.garmin.com/fit/protocol/
 import (
 	"github.com/wader/fq/format"
@@ -68,6 +70,26 @@ var baseTypeMap = scalar.UToSymStr{
 	baseTypeUint64z: "uint64z",
 }
 
+var baseTypeSize = map[int]int{
+	baseTypeEnum:    1,
+	baseTypeSint8:   1,
+	baseTypeUint8:   1,
+	baseTypeSint16:  2,
+	baseTypeUint16:  2,
+	baseTypeSint32:  4,
+	baseTypeUint32:  4,
+	baseTypeString:  1,
+	baseTypeFloat32: 4,
+	baseTypeFloat64: 8,
+	baseTypeUint8z:  1,
+	baseTypeUint16z: 2,
+	baseTypeUint32z: 4,
+	baseTypeByte:    1,
+	baseTypeSint64:  8,
+	baseTypeUint64:  8,
+	baseTypeUint64z: 8,
+}
+
 type baseType struct {
 }
 
@@ -111,49 +133,69 @@ func init() {
 	})
 }
 
+func decodeBaseType(d *decode.D, f field) {
+	switch f.baseType {
+	case baseTypeEnum:
+		d.FieldU8("value")
+	case baseTypeSint8:
+		d.FieldS8("value")
+	case baseTypeUint8:
+		d.FieldU8("value")
+	case baseTypeSint16:
+		d.FieldS16("value")
+	case baseTypeUint16:
+		d.FieldU16("value")
+	case baseTypeSint32:
+		d.FieldU32("value")
+	case baseTypeUint32:
+		d.FieldU32("value")
+	case baseTypeString:
+		d.FieldUTF8NullFixedLen("value", int(f.size))
+	case baseTypeFloat32:
+		d.FieldF32("value")
+	case baseTypeFloat64:
+		d.FieldF64("value")
+	case baseTypeUint8z:
+		d.FieldU8("value")
+	case baseTypeUint16z:
+		d.FieldU16("value")
+	case baseTypeUint32z:
+		d.FieldU32("value")
+	case baseTypeByte:
+		d.FieldRawLen("value", int64(f.size)*8)
+	case baseTypeSint64:
+		d.FieldS64("value")
+	case baseTypeUint64:
+		d.FieldU64("value")
+	case baseTypeUint64z:
+		d.FieldU64("value")
+	default:
+		panic("unreachable")
+	}
+}
+
 func decodeDataMessage(d *decode.D, de definition) {
 	d.FieldArray("fields", func(d *decode.D) {
-		for _, e := range de.fields {
-			d.FieldArray("values", func(d *decode.D) {
-				switch e.baseType {
-				case baseTypeEnum:
-					d.FieldU8("value")
-				case baseTypeSint8:
-					d.FieldS8("value")
-				case baseTypeUint8:
-					d.FieldU8("value")
-				case baseTypeSint16:
-					d.FieldS16("value")
-				case baseTypeUint16:
-					d.FieldU16("value")
-				case baseTypeSint32:
-					d.FieldU32("value")
-				case baseTypeUint32:
-					d.FieldU32("value")
-				case baseTypeString:
-					d.FieldU8("value") // TODO:
-				case baseTypeFloat32:
-					d.FieldF32("value")
-				case baseTypeFloat64:
-					d.FieldF64("value")
-				case baseTypeUint8z:
-					d.FieldU8("value")
-				case baseTypeUint16z:
-					d.FieldU8("value")
-				case baseTypeUint32z:
-					d.FieldU8("value")
-				case baseTypeByte:
-					d.FieldU8("value")
-				case baseTypeSint64:
-					d.FieldU8("value")
-				case baseTypeUint64:
-					d.FieldU8("value")
-				case baseTypeUint64z:
-					d.FieldU8("value")
-				default:
-					panic("unreachable")
-				}
-			})
+		for _, f := range de.fields {
+			// TODO: error
+			baseSize, ok := baseTypeSize[int(f.baseType)]
+			if !ok {
+				d.Fatalf("unknown base size for base type %d", f.baseType)
+			}
+			values := int(f.size) / baseSize
+
+			switch {
+			case values == 1,
+				f.baseType == baseTypeString,
+				f.baseType == baseTypeByte:
+				decodeBaseType(d, f)
+			default:
+				d.FieldArray("values", func(d *decode.D) {
+					for i := 0; i < values; i++ {
+						decodeBaseType(d, f)
+					}
+				})
+			}
 		}
 	})
 }
