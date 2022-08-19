@@ -40,6 +40,7 @@ Example usages:
 --repl,-i               Interactive REPL
 --slurp,-s              Slurp all inputs into an array or string (-Rs)
 --unicode-output,-U     Force unicode output
+--value-output,-V       Output JSON value (don't display)
 --version,-v            Show version
 $ fq -i
 null> ^D
@@ -96,6 +97,7 @@ sizebase            10
 slurp               false
 string_input        false
 unicode             false
+value_output        false
 verbose             false
 width               135
 $ fq --help formats

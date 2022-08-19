@@ -83,6 +83,7 @@ $ fq -n options
   "slurp": false,
   "string_input": false,
   "unicode": false,
+  "value_output": false,
   "verbose": false,
   "width": 135
 }
