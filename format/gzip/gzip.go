@@ -5,12 +5,14 @@ package gz
 // TODO: verify isize?
 
 import (
+	"bytes"
 	"compress/flate"
 	"hash/crc32"
 	"io"
 	"time"
 
 	"github.com/wader/fq/format"
+	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/decode"
 	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
@@ -28,6 +30,8 @@ func init() {
 			{Names: []string{format.PROBE}, Group: &probeFormat},
 		},
 	})
+
+	interp.RegisterFunc0("fromdeflate", fromDeflate)
 }
 
 const delfateMethod = 8
@@ -123,4 +127,25 @@ func gzDecode(d *decode.D, _ any) any {
 	}
 
 	return nil
+}
+
+func fromDeflate(_ *interp.Interp, c any) any {
+	inBR, err := interp.ToBitReader(c)
+	if err != nil {
+		return err
+	}
+
+	fr := flate.NewReader(bitio.NewIOReader(inBR))
+	b := &bytes.Buffer{}
+	//nolint:gosec
+	if _, err := io.Copy(b, fr); err != nil {
+		return err
+	}
+	fr.Close()
+
+	bb, err := interp.NewBinaryFromBitReader(bitio.NewBitReader(b.Bytes(), -1), 8, 0)
+	if err != nil {
+		return err
+	}
+	return bb
 }
